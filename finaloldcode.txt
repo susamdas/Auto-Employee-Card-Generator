@@ -1,0 +1,396 @@
+"""
+Grameen Bank Employee Card Generator — Final Clean Version
+No blank areas. Front & back fully utilise the card space.
+"""
+import os, io, sys, argparse
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.utils.cell import coordinate_to_tuple
+from PIL import Image, ImageDraw, ImageFont
+
+EXCEL_PATH    = "EmployeeList.xlsx"
+OUTPUT_DIR    = "output_cards_final"
+OUTPUT_FORMAT = "PNG"
+DPI           = 300
+CARD_W=215; CARD_H=310; SCALE=4
+RW=CARD_W*SCALE; RH=CARD_H*SCALE
+GAP_PX=20; GAP_R=GAP_PX*SCALE; SHEET_RH=RH*2+GAP_R
+
+# ══════════════════════════════════════════════════════════════
+#  LOGO PATH - UPDATE THIS TO YOUR LOGO LOCATION
+# ══════════════════════════════════════════════════════════════
+LOGO_PATH = r"D:\Grameen Bank\Auto Employee Card Generator\logo\grameelogo.png"
+
+C_WHITE=(255,255,255); C_BLACK=(12,12,12); C_DARK_GREY=(55,55,55)
+C_MID_GREY=(115,115,115); C_BORDER=(195,195,195)
+C_GREEN=(20,110,36); C_RED=(182,22,22); C_GOLD=(185,148,42)
+C_STRIPE=(245,250,245); C_PHOTO_BG=(210,218,228)
+COL_PHOTO="N"; COL_CARDHOLDER_SIG="L"; COL_AUTHORITY_SIG="M"
+
+def _find_font(*names):
+    for d in ["/usr/share/fonts","/usr/local/share/fonts",os.path.expanduser("~/.fonts"),
+              "C:/Windows/Fonts","/Library/Fonts",os.path.expanduser("~/Library/Fonts")]:
+        if not os.path.exists(d): continue
+        for root,_,files in os.walk(d):
+            for fn in files:
+                if fn.lower() in [n.lower() for n in names]: return os.path.join(root,fn)
+    return None
+
+def load_fonts():
+    r=_find_font("times.ttf","LiberationSerif-Regular.ttf","DejaVuSerif.ttf","FreeSerif.ttf")
+    b=_find_font("timesbd.ttf","LiberationSerif-Bold.ttf","DejaVuSerif-Bold.ttf","FreeSerifBold.ttf")
+    i=_find_font("timesi.ttf","LiberationSerif-Italic.ttf","DejaVuSerif-Oblique.ttf","FreeSerifItalic.ttf")
+    def f(p,sz):
+        try: return ImageFont.truetype(p or r or b,sz*SCALE)
+        except: return ImageFont.load_default()
+    return {"logo_name":f(b,16),"logo_sub":f(i,9),"emp_name":f(b,16),"emp_id":f(b,10),
+            "emp_desig":f(r,9.5),"sig_label":f(r,8.5),"small":f(r,8),
+            "back_head":f(b,13),"back_label":f(b,10),"back_value":f(r,10),
+            "back_sec":f(b,11),"back_ret":f(i,9),"back_bank":f(b,13),"back_dept":f(r,9)}
+
+def s(n): return int(n*SCALE)
+def tw(d,t,f): b=d.textbbox((0,0),t,font=f); return b[2]-b[0]
+def th(d,t,f): b=d.textbbox((0,0),t,font=f); return b[3]-b[1]
+def cxt(d,t,f,cx,y,c): d.text((cx-tw(d,t,f)//2,y),t,font=f,fill=c)
+def wrap(d,txt,f,mw,ml=3):
+    words=txt.split(); lines,line=[],""
+    for w in words:
+        test=(line+" "+w).strip()
+        if tw(d,test,f)>mw and line:
+            lines.append(line); line=w
+            if len(lines)>=ml: break
+        else: line=test
+    if line and len(lines)<ml: lines.append(line)
+    return lines
+
+def paste_photo(c,raw,x,y,w,h):
+    try:
+        s_=Image.open(io.BytesIO(raw)).convert("RGB")
+        sr=s_.width/s_.height; br=w/h
+        nw=int(h*sr) if sr>br else w; nh=h if sr>br else int(w/sr)
+        s_=s_.resize((nw,nh),Image.LANCZOS)
+        cx_=(nw-w)//2; cy_=(nh-h)//2
+        c.paste(s_.crop((cx_,cy_,cx_+w,cy_+h)),(x,y))
+    except: pass
+
+def paste_logo(c,path,x,y,mw,mh):
+    # Try the provided path first, then fallback to script directory
+    script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in dir() else os.getcwd()
+    fallback = os.path.join(script_dir, "grameelogo.png")
+    
+    for p in [path, fallback]:
+        if os.path.isfile(p):
+            try:
+                lg=Image.open(p).convert("RGBA"); lg.thumbnail((mw,mh),Image.LANCZOS)
+                lw,lh=lg.size; bg=Image.new("RGBA",(lw,lh),C_WHITE+(255,))
+                bg.paste(lg,mask=lg.split()[3]); c.paste(bg.convert("RGB"),(x,y)); return lw,lh
+            except Exception as e:
+                print(f"  Warning: Logo load failed ({p}): {e}")
+                continue
+    return 0,0
+
+def paste_sig(c,raw,x,y,w,h):
+    try:
+        s_=Image.open(io.BytesIO(raw)).convert("RGBA"); s_.thumbnail((w,h),Image.LANCZOS)
+        nd=[]
+        for r_,g_,b_,a_ in s_.getdata():
+            br=(r_+g_+b_)/3
+            nd.append((r_,g_,b_,0) if br>215 else (15,15,15,int((1-br/255)*220)))
+        s_.putdata(nd); sw,sh=s_.size
+        c.paste(s_,(x+(w-sw)//2,y+(h-sh)//2),s_)
+    except: pass
+
+def rounded_card(img):
+    m=Image.new("L",(RW,RH),0)
+    ImageDraw.Draw(m).rounded_rectangle([0,0,RW-1,RH-1],radius=s(13),fill=255)
+    o=Image.new("RGB",(RW,RH),C_WHITE); o.paste(img,mask=m); return o
+
+
+# ══════════════════════════════════════════════════════════════
+#  FRONT CARD
+#  Key idea: photo expands to fill full available height
+#  (header bottom → signature strip top), with text right of it.
+#  No free space anywhere.
+# ══════════════════════════════════════════════════════════════
+def draw_front(card, fonts, raw_photo, raw_ch, raw_auth):
+    img=Image.new("RGB",(RW,RH),C_WHITE)
+    d=ImageDraw.Draw(img)
+    PAD=s(10)
+
+    # ── HEADER ───────────────────────────────────────────────
+    lw,lh=paste_logo(img,LOGO_PATH,PAD,s(8),s(52),s(52))
+    d=ImageDraw.Draw(img)
+    TX=PAD+(lw+s(6) if lw else 0)
+    d.text((TX,s(10)),"Grameen Bank",font=fonts["logo_name"],fill=C_GREEN)
+    d.text((TX,s(10)+th(d,"Grameen Bank",fonts["logo_name"])+s(2)),
+           "Nobel Peace Prize Winner",font=fonts["logo_sub"],fill=C_RED)
+    HDR_H=max(s(8)+lh+s(6),s(62))
+    d.line([(0,HDR_H),(RW,HDR_H)],fill=C_BORDER,width=s(1))
+
+    # ── CALCULATE ZONES ──────────────────────────────────────
+    # Footer bar height
+    FOOTER_H = s(6)
+    # Signature strip: image area + line + label
+    SIG_IMG_H = s(38)
+    SIG_LINE_GAP = s(4)
+    SIG_LBL_H   = th(d,"Ag",fonts["sig_label"])+s(6)
+    SIG_TOP_PAD = s(6)
+    # Pin sig strip to footer — work upward from RH
+    SIG_LBL_Y   = RH - FOOTER_H - SIG_LBL_H          # label top
+    SIG_LINE_Y2 = SIG_LBL_Y - s(4)                    # underline
+    SIG_PY_ABS  = SIG_LINE_Y2 - SIG_LINE_GAP - SIG_IMG_H  # top of sig images
+    BODY_BOT    = SIG_PY_ABS - SIG_TOP_PAD            # divider line
+
+    BODY_TOP = HDR_H + s(8)
+
+    # ── BODY: photo LEFT + text RIGHT ────────────────────────
+    PW   = s(76)
+    PH   = BODY_BOT - BODY_TOP - s(2)   # photo fills full body height
+    PX   = PAD
+    PY   = BODY_TOP
+
+    # Draw photo frame + photo
+    d.rectangle([PX-s(2),PY-s(2),PX+PW+s(2),PY+PH+s(2)],outline=C_BORDER,width=s(1))
+    d.rectangle([PX,PY,PX+PW,PY+PH],fill=C_PHOTO_BG)
+    if raw_photo: paste_photo(img,raw_photo,PX,PY,PW,PH)
+    d=ImageDraw.Draw(img)
+
+    # ── TEXT COLUMN ───────────────────────────────────────────
+    TX2=PX+PW+s(10); IW=RW-TX2-PAD
+    TY2=BODY_TOP
+
+    # Name
+    name=card["name"]; nfont=fonts["emp_name"]
+    while tw(d,name,nfont)>IW:
+        try: nfont=ImageFont.truetype(nfont.path,nfont.size-SCALE)
+        except: break
+    d.text((TX2,TY2),name,font=nfont,fill=C_BLACK); TY2+=th(d,name,nfont)+s(4)
+
+    # ID line
+    id_str=f"ID : {card['id']}"
+    d.text((TX2,TY2),id_str,font=fonts["emp_id"],fill=C_BLACK)
+    TY2+=th(d,id_str,fonts["emp_id"])+s(5)
+
+    # Thin underline rule
+    d.line([(TX2,TY2),(RW-PAD,TY2)],fill=C_BORDER,width=s(1)); TY2+=s(7)
+
+    # Designation
+    for wl in wrap(d,card["designation"],fonts["emp_desig"],IW,2):
+        d.text((TX2,TY2),wl,font=fonts["emp_desig"],fill=C_DARK_GREY)
+        TY2+=th(d,wl,fonts["emp_desig"])+s(2)
+
+    # Office designation
+    if card["office_designation"]:
+        for wl in wrap(d,f"({card['office_designation']})",fonts["emp_desig"],IW,1):
+            d.text((TX2,TY2),wl,font=fonts["emp_desig"],fill=C_DARK_GREY)
+            TY2+=th(d,wl,fonts["emp_desig"])+s(2)
+
+    # Department
+    for wl in wrap(d,card["department"],fonts["emp_desig"],IW,2):
+        d.text((TX2,TY2),wl,font=fonts["emp_desig"],fill=C_DARK_GREY)
+        TY2+=th(d,wl,fonts["emp_desig"])+s(2)
+
+    # ── MINI INFO BOX — fills remaining right-column space ────
+    # Light green tinted box with key details below the text
+    TY2+=s(10)
+    BOX_PAD=s(6)
+    BOX_X=TX2-s(4); BOX_W=IW+s(4)
+    # Box stretches from TY2 to BODY_BOT - s(4)
+    BOX_Y1=TY2; BOX_Y2=BODY_BOT-s(4)
+    d.rectangle([BOX_X,BOX_Y1,BOX_X+BOX_W,BOX_Y2],fill=(235,248,237),outline=(180,218,185),width=s(1))
+    BY=BOX_Y1+BOX_PAD
+    sf2=fonts["small"]
+    for label,value in [("Blood","card['blood_group']"),
+                        ("Mobile","card['mobile']"),
+                        ("Issue","card['issuing_date']")]:
+        val={"card['blood_group']":card["blood_group"],"card['mobile']":card["mobile"],
+             "card['issuing_date']":card["issuing_date"]}[value]
+        if not val or BY+th(d,"Ag",sf2)+s(2)>BOX_Y2-BOX_PAD: break
+        d.text((BOX_X+BOX_PAD,BY),f"{label}:",font=sf2,fill=C_GREEN)
+        lw_=tw(d,f"{label}:",sf2)
+        remaining_w=BOX_W-BOX_PAD*2-lw_-s(4)
+        # truncate value if needed
+        val_disp=val
+        while tw(d,val_disp,sf2)>remaining_w and len(val_disp)>4:
+            val_disp=val_disp[:-4]+"…"
+        d.text((BOX_X+BOX_PAD+lw_+s(4),BY),val_disp,font=sf2,fill=C_DARK_GREY)
+        BY+=th(d,"Ag",sf2)+s(5)
+
+    # ── DIVIDER — sits right at BODY_BOT (no extra gap) ─────
+    d.line([(0,BODY_BOT),(RW,BODY_BOT)],fill=C_BORDER,width=s(1))
+
+    # ── SIGNATURE STRIP — light green tint so it reads as a zone ──
+    HALF  = RW//2; SIG_W=HALF-PAD-s(6)
+    # Tinted background for entire sig zone (BODY_BOT → footer)
+    d.rectangle([0, BODY_BOT+s(1), RW, RH-FOOTER_H], fill=(245,252,246))
+    # Centre divider between two sigs
+    d.line([(RW//2, BODY_BOT+s(1)), (RW//2, RH-FOOTER_H)], fill=C_BORDER, width=s(1))
+
+    if raw_ch:   paste_sig(img,raw_ch,   PAD,       SIG_PY_ABS,SIG_W,SIG_IMG_H)
+    if raw_auth: paste_sig(img,raw_auth, HALF+s(6), SIG_PY_ABS,SIG_W,SIG_IMG_H)
+    d=ImageDraw.Draw(img)
+    d.line([(PAD,SIG_LINE_Y2),(PAD+SIG_W,SIG_LINE_Y2)],fill=C_GREEN,width=s(1))
+    d.line([(HALF+s(6),SIG_LINE_Y2),(HALF+s(6)+SIG_W,SIG_LINE_Y2)],fill=C_GREEN,width=s(1))
+    cxt(d,"Card Holder",fonts["sig_label"],PAD+SIG_W//2,      SIG_LBL_Y,C_GREEN)
+    cxt(d,"Authority",  fonts["sig_label"],HALF+s(6)+SIG_W//2,SIG_LBL_Y,C_GREEN)
+
+    # ── GREEN FOOTER BAR ─────────────────────────────────────
+    d.rectangle([0,RH-FOOTER_H,RW,RH],fill=C_GREEN)
+
+    return rounded_card(img)
+
+
+# ══════════════════════════════════════════════════════════════
+#  BACK CARD — content spread top-to-bottom, no dead space
+# ══════════════════════════════════════════════════════════════
+def draw_back(card, fonts):
+    img=Image.new("RGB",(RW,RH),C_WHITE)
+    d=ImageDraw.Draw(img)
+    PAD=s(14); CX=RW//2; IW=RW-PAD*2
+
+    # ── GREEN HEADER ─────────────────────────────────────────
+    HDR_H=s(44)
+    d.rectangle([0,0,RW,HDR_H],fill=C_GREEN)
+    cxt(d,"Employee Information",fonts["back_head"],CX,s(10),C_WHITE)
+    d.line([(0,HDR_H),(RW,HDR_H)],fill=C_GOLD,width=s(2))
+
+    # ── INFO ROWS with zebra stripes ──────────────────────────
+    Y=HDR_H+s(14)
+    ROW_H=th(d,"Ag",fonts["back_value"])+s(12)
+
+    def info_row(label,value,y,stripe):
+        if stripe: d.rectangle([0,y-s(5),RW,y+ROW_H-s(5)],fill=C_STRIPE)
+        d.text((PAD,y),f"{label} :",font=fonts["back_label"],fill=C_BLACK)
+        d.text((PAD+tw(d,f"{label} :",fonts["back_label"])+s(5),y),
+               value,font=fonts["back_value"],fill=C_DARK_GREY)
+        return y+ROW_H
+
+    Y=info_row("Blood Group",card["blood_group"] or "-",Y,False)
+    Y=info_row("National ID", card["national_id"]  or "-",Y,True)
+    Y=info_row("Mobile",      card["mobile"]        or "-",Y,False)
+
+    Y+=s(10); d.line([(PAD,Y),(RW-PAD,Y)],fill=C_BORDER,width=s(1)); Y+=s(16)
+
+    # ── PERMANENT ADDRESS ─────────────────────────────────────
+    cxt(d,"Permanent Address",fonts["back_sec"],CX,Y,C_BLACK)
+    Y+=th(d,"Ag",fonts["back_sec"])+s(8)
+    for ln in wrap(d,card["address"],fonts["back_value"],IW,4):
+        cxt(d,ln,fonts["back_value"],CX,Y,C_DARK_GREY); Y+=th(d,"Ag",fonts["back_value"])+s(4)
+
+    Y+=s(10)
+    cxt(d,f"Issuing Date :  {card['issuing_date']}",fonts["back_value"],CX,Y,C_BLACK)
+    Y+=th(d,"Ag",fonts["back_value"])+s(16)
+
+    d.line([(PAD,Y),(RW-PAD,Y)],fill=C_BORDER,width=s(1)); Y+=s(16)
+
+    # ── RETURN-TO — vertically centred in remaining space ─────
+    FOOTER_H=s(6)
+    ret_lines=wrap(d,card["bank_address"],fonts["back_dept"],IW,5)
+    block_h=(th(d,"Ag",fonts["back_ret"])+s(12)+
+             th(d,"Ag",fonts["back_bank"])+s(12)+
+             len(ret_lines)*(th(d,"Ag",fonts["back_dept"])+s(4)))
+    remaining=RH-FOOTER_H-Y
+    Y+=max(s(4),(remaining-block_h)//2)
+
+    cxt(d,"If found please return to :",fonts["back_ret"],CX,Y,C_MID_GREY)
+    Y+=th(d,"Ag",fonts["back_ret"])+s(12)
+    cxt(d,"Grameen Bank",fonts["back_bank"],CX,Y,C_GREEN)
+    Y+=th(d,"Ag",fonts["back_bank"])+s(12)
+    for ln in ret_lines:
+        cxt(d,ln,fonts["back_dept"],CX,Y,C_DARK_GREY); Y+=th(d,"Ag",fonts["back_dept"])+s(4)
+
+    d.rectangle([0,RH-FOOTER_H,RW,RH],fill=C_GREEN)
+    return rounded_card(img)
+
+
+# ══════════════════════════════════════════════════════════════
+#  EXTRACTION + MAIN (unchanged)
+# ══════════════════════════════════════════════════════════════
+def col_letter_to_index(l):
+    r=0
+    for ch in l.upper(): r=r*26+(ord(ch)-ord('A')+1)
+    return r
+def get_anchor_row_col(io_):
+    a=io_.anchor
+    if hasattr(a,'_from'): return a._from.row+1,a._from.col+1
+    elif hasattr(a,'row'): return a.row+1,a.col+1
+    elif isinstance(a,str):
+        r,c=coordinate_to_tuple(a); return r,c
+    return None,None
+def extract_raw(xl,*cols):
+    wb=load_workbook(xl); ws=wb.active
+    cm={c.upper():col_letter_to_index(c) for c in cols}
+    res={c:{} for c in cm}; imgs=getattr(ws,'_images',[])
+    for io_ in imgs:
+        try:
+            row,ci=get_anchor_row_col(io_)
+            if row is None: continue
+            raw=io_._data()
+            if callable(raw): raw=raw()
+            for cl,ti in cm.items():
+                if ci==ti: res[cl][row]=raw
+        except: pass
+    for c in cm: print(f"  -> Column {c}: {len(res[c])} image(s)")
+    return res
+
+def generate_cards(excel_path=EXCEL_PATH,output_dir=OUTPUT_DIR,
+                   output_format=OUTPUT_FORMAT,
+                   col_photo=COL_PHOTO,col_cardholder_sig=COL_CARDHOLDER_SIG,
+                   col_authority_sig=COL_AUTHORITY_SIG):
+    print(f"\n{'='*60}\n  Grameen Bank Employee Card Generator\n{'='*60}")
+    if not os.path.isfile(excel_path): sys.exit(f"Excel not found: {excel_path}")
+    os.makedirs(output_dir,exist_ok=True)
+    print("Extracting images ...")
+    raw=extract_raw(excel_path,col_photo,col_cardholder_sig,col_authority_sig)
+    pm=raw[col_photo.upper()]; chm=raw[col_cardholder_sig.upper()]; am=raw[col_authority_sig.upper()]
+    print("Reading data ...")
+    df=pd.read_excel(excel_path,dtype=str).fillna(""); df.columns=df.columns.str.strip()
+    req=["EmployeeID","Name","Blood Group","National ID","Mobile Number","Permanent Address",
+         "Office Designation","Employee Designation","Department","Issuing Date","Bank's Address"]
+    miss=[c for c in req if c not in df.columns]
+    if miss: sys.exit(f"Missing: {miss}")
+    print(f"  -> {len(df)} record(s).")
+    print("Loading fonts ..."); fonts=load_fonts()
+    print("Rendering ...")
+    for i,(_,row) in enumerate(df.iterrows()):
+        er=i+2
+        try: id_=pd.to_datetime(row["Issuing Date"],dayfirst=True).strftime("%d %B %Y")
+        except: id_=str(row["Issuing Date"]).strip()
+        mob=str(row["Mobile Number"]).strip().split(".")[0]
+        if not mob.startswith("0"): mob="0"+mob
+        card={"id":str(row["EmployeeID"]).strip(),"name":str(row["Name"]).strip(),
+              "blood_group":str(row["Blood Group"]).strip(),"national_id":str(row["National ID"]).strip(),
+              "mobile":mob,"address":str(row["Permanent Address"]).strip(),
+              "office_designation":str(row["Office Designation"]).strip(),
+              "designation":str(row["Employee Designation"]).strip(),
+              "department":str(row["Department"]).strip(),"issuing_date":id_,
+              "bank_address":str(row["Bank's Address"]).strip()}
+        rp=pm.get(er); rc=chm.get(er); ra=am.get(er)
+        fr=draw_front(card,fonts,rp,rc,ra)
+        br=draw_back(card,fonts)
+        sheet=Image.new("RGB",(RW,SHEET_RH),(235,237,240))
+        sheet.paste(fr,(0,0)); sheet.paste(br,(0,RH+GAP_R))
+        dd=ImageDraw.Draw(sheet); dy=RH+GAP_R//2
+        for x in range(0,RW,s(20)):
+            dd.line([(x,dy),(min(x+s(12),RW),dy)],fill=(140,148,158),width=s(1))
+        final=sheet.resize((CARD_W,CARD_H*2+GAP_PX),Image.LANCZOS)
+        sid=card["id"].replace("/","-").replace("\\","-").replace(" ","_")
+        ext="jpg" if output_format.upper()=="JPEG" else "png"
+        op=os.path.join(output_dir,f"{sid}.{ext}")
+        if output_format.upper()=="JPEG":
+            final.convert("RGB").save(op,"JPEG",quality=97,dpi=(DPI,DPI),subsampling=0)
+        else:
+            final.save(op,"PNG",dpi=(DPI,DPI))
+        print(f"  [{i+1:>3}/{len(df)}]  {card['name']:<32}->  {op}")
+    print(f"\n  Done! {len(df)} card(s) -> ./{output_dir}/\n")
+
+if __name__=="__main__":
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--excel",default=EXCEL_PATH)
+    parser.add_argument("--output-dir",default=OUTPUT_DIR)
+    parser.add_argument("--format",default=OUTPUT_FORMAT,choices=["PNG","JPEG"])
+    parser.add_argument("--col-photo",default=COL_PHOTO)
+    parser.add_argument("--col-ch-sig",default=COL_CARDHOLDER_SIG)
+    parser.add_argument("--col-auth-sig",default=COL_AUTHORITY_SIG)
+    args=parser.parse_args()
+    generate_cards(args.excel,args.output_dir,args.format,args.col_photo,args.col_ch_sig,args.col_auth_sig)

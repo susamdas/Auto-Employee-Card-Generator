@@ -1,0 +1,681 @@
+"""
+Grameen Bank Employee Card Generator
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Card size  : 211 × 307 px  (W × H) — VERTICAL
+  Render     : ×4 internal scale → 844 × 1228 px, saved at 300 DPI
+  Font       : Times New Roman  (bold / regular / italic)
+  Sheet      : front card on top + 20 px gap + back card  (211 × 634 px)
+
+  FRONT layout
+  ┌────────────────────┐
+  │ [logo] Grameen Bank│  green header
+  │        Nobel…      │
+  ├────────────────────┤
+  │    ┌──────────┐    │  centered photo
+  │    │  Photo   │    │
+  │    └──────────┘    │
+  │                    │
+  │     Employee Name  │
+  │     ID : XXXXX     │
+  │  ───────────────── │
+  │     Designation    │
+  │     Department     │
+  ├────────────────────┤
+  │  [CH sig] [AU sig] │
+  │  CardHolder  Auth  │
+  └────────────────────┘
+
+  BACK layout
+  ┌────────────────────┐
+  │  Employee Info     │  green header
+  ├────────────────────┤
+  │  Blood Group : …   │
+  │  National ID : …   │
+  │  Mobile      : …   │
+  ├────────────────────┤
+  │  Permanent Address │
+  │  …                 │
+  │  Issuing Date: …   │
+  ├────────────────────┤
+  │ If found return to │
+  │    Grameen Bank    │
+  │    HO address…     │
+  └────────────────────┘
+
+Excel columns needed:
+    EmployeeID, Name, Blood Group, National ID, Mobile Number,
+    Permanent Address, Office Designation, Employee Designation,
+    Department, Issuing Date, Bank's Address,
+    Card Holder Sign (col L), Authority Sign (col M), Photo (col N)
+
+Install:
+    pip install pandas openpyxl Pillow
+"""
+
+import os, io, sys, argparse
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.utils.cell import coordinate_to_tuple
+from PIL import Image, ImageDraw, ImageFont
+
+# ══════════════════════════════════════════════════════════════
+#  CONFIG
+# ══════════════════════════════════════════════════════════════
+EXCEL_PATH    = "EmployeeList.xlsx"
+OUTPUT_DIR    = "output_cards"
+OUTPUT_FORMAT = "PNG"
+DPI           = 300
+
+# Final card dimensions (logical px)
+CARD_W = 215
+CARD_H = 310
+
+# Internal render scale — everything drawn at x4, then downsampled to final size
+SCALE  = 4
+RW     = CARD_W * SCALE   # 844
+RH     = CARD_H * SCALE   # 1228
+
+GAP_PX   = 20                      # gap between front & back on sheet (logical)
+GAP_R    = GAP_PX * SCALE          # gap in render space
+SHEET_RH = RH * 2 + GAP_R         # total render-space sheet height
+
+# Logo path
+LOGO_PATH = r"D:\Grameen Bank\Auto Employee Card Generator\logo\grameelogo.png"
+_LOGO_FALLBACK = os.path.join(
+    os.path.dirname(__file__) if '__file__' in dir() else '.', "grameelogo.png")
+
+# Colours
+C_WHITE      = (255, 255, 255)
+C_BLACK      = (12,  12,  12)
+C_DARK_GREY  = (55,  55,  55)
+C_MID_GREY   = (115, 115, 115)
+C_BORDER     = (195, 195, 195)
+C_GREEN      = (20,  110,  36)
+C_GREEN_DARK = (12,   70,  22)
+C_RED        = (182,  22,  22)
+C_GOLD       = (185, 148,  42)
+
+# Excel columns
+COL_PHOTO          = "N"
+COL_CARDHOLDER_SIG = "L"
+COL_AUTHORITY_SIG  = "M"
+
+
+# ══════════════════════════════════════════════════════════════
+#  FONT LOADER  — Times New Roman preferred, serif fallbacks
+# ══════════════════════════════════════════════════════════════
+
+def _find_font(*names):
+    dirs = [
+        "C:/Windows/Fonts",
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        os.path.expanduser("~/.fonts"),
+        "/Library/Fonts",
+        os.path.expanduser("~/Library/Fonts"),
+        "/System/Library/Fonts",
+    ]
+    for d in dirs:
+        if not os.path.exists(d):
+            continue
+        for root, _, files in os.walk(d):
+            for fn in files:
+                if fn.lower() in [n.lower() for n in names]:
+                    return os.path.join(root, fn)
+    return None
+
+
+def load_fonts():
+    tnr_regular = _find_font(
+        "times.ttf", "Times New Roman.ttf", "TimesNewRoman.ttf", "TIMES.TTF",
+        "LiberationSerif-Regular.ttf", "DejaVuSerif.ttf", "FreeSerif.ttf")
+    tnr_bold = _find_font(
+        "timesbd.ttf", "Times New Roman Bold.ttf", "TimesNewRomanBold.ttf", "TIMESBD.TTF",
+        "LiberationSerif-Bold.ttf", "DejaVuSerif-Bold.ttf", "FreeSerifBold.ttf")
+    tnr_italic = _find_font(
+        "timesi.ttf", "Times New Roman Italic.ttf", "TimesNewRomanItalic.ttf", "TIMESI.TTF",
+        "LiberationSerif-Italic.ttf", "DejaVuSerif-Oblique.ttf", "FreeSerifItalic.ttf")
+
+    fb_r = tnr_regular or tnr_bold
+    fb_b = tnr_bold    or tnr_regular
+    fb_i = tnr_italic  or tnr_regular
+
+    print(f"  -> Font regular : {tnr_regular or '(built-in default)'}")
+    print(f"  -> Font bold    : {tnr_bold    or '(built-in default)'}")
+    print(f"  -> Font italic  : {tnr_italic  or '(built-in default)'}")
+
+    def f(path, size):
+        try:
+            return ImageFont.truetype(path or fb_r, size * SCALE)
+        except Exception:
+            return ImageFont.load_default()
+
+    return {
+        # FRONT
+        "logo_name":  f(tnr_bold,    16),   # "Grameen Bank" — prominent
+        "logo_sub":   f(tnr_italic,   9),   # "Nobel Peace Prize Winner"
+        "emp_name":   f(tnr_bold,    17),   # employee name — large & bold
+        "emp_id":     f(tnr_bold,    11),   # "ID : 54637"
+        "emp_desig":  f(tnr_regular, 10),   # designation / dept lines
+        "sig_label":  f(tnr_regular,  9),   # "Card Holder" / "Authority"
+        # BACK
+        "back_head":  f(tnr_bold,    13),
+        "back_label": f(tnr_bold,    10),
+        "back_value": f(tnr_regular, 10),
+        "back_sec":   f(tnr_bold,    11),
+        "back_ret":   f(tnr_italic,   9),
+        "back_bank":  f(tnr_bold,    13),
+        "back_dept":  f(tnr_regular,  9),
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+#  DRAW HELPERS
+# ══════════════════════════════════════════════════════════════
+
+def s(n):
+    return int(n * SCALE)
+
+def tw(draw, text, font):
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[2] - bb[0]
+
+def th_val(draw, text, font):
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[3] - bb[1]
+
+def centered(draw, text, font, cx, y, color):
+    draw.text((cx - tw(draw, text, font) // 2, y), text, font=font, fill=color)
+
+def wrap_text(draw, text, font, max_w, max_lines=3):
+    words = text.split()
+    lines, line = [], ""
+    for w in words:
+        test = (line + " " + w).strip()
+        if tw(draw, test, font) > max_w and line:
+            lines.append(line)
+            line = w
+            if len(lines) >= max_lines:
+                break
+        else:
+            line = test
+    if line and len(lines) < max_lines:
+        lines.append(line)
+    return lines
+
+def hline(draw, y, x0=0, x1=None, color=C_BORDER, width=1):
+    draw.line([(x0, y), (x1 if x1 else RW, y)], fill=color, width=width)
+
+def rounded_white_card(img):
+    mask = Image.new("L", (RW, RH), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, RW - 1, RH - 1], radius=s(13), fill=255)
+    out = Image.new("RGB", (RW, RH), C_WHITE)
+    out.paste(img, mask=mask)
+    return out
+
+def paste_photo(canvas, raw_bytes, x, y, w, h):
+    try:
+        src = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    except Exception:
+        return
+    sr = src.width / src.height
+    br = w / h
+    nw = int(h * sr) if sr > br else w
+    nh = h           if sr > br else int(w / sr)
+    src = src.resize((nw, nh), Image.LANCZOS)
+    cx_ = (nw - w) // 2; cy_ = (nh - h) // 2
+    src = src.crop((cx_, cy_, cx_ + w, cy_ + h))
+    canvas.paste(src, (x, y))
+
+def paste_logo(canvas, logo_path, x, y, max_w, max_h):
+    for path in [logo_path, _LOGO_FALLBACK]:
+        if os.path.isfile(path):
+            try:
+                logo = Image.open(path).convert("RGBA")
+                logo.thumbnail((max_w, max_h), Image.LANCZOS)
+                lw, lh = logo.size
+                bg = Image.new("RGBA", (lw, lh), C_WHITE + (255,))
+                bg.paste(logo, mask=logo.split()[3])
+                canvas.paste(bg.convert("RGB"), (x, y))
+                return lw, lh
+            except Exception as e:
+                print(f"  Warning: Logo load failed ({path}): {e}")
+    return 0, 0
+
+def paste_signature(canvas, raw_bytes, x, y, w, h):
+    try:
+        src = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
+        src.thumbnail((w, h), Image.LANCZOS)
+        data = src.getdata()
+        new_data = []
+        for r, g, b, a in data:
+            brightness = (r + g + b) / 3
+            if brightness > 215:
+                new_data.append((r, g, b, 0))
+            else:
+                alpha = int((1 - brightness / 255) * 220)
+                new_data.append((15, 15, 15, alpha))
+        src.putdata(new_data)
+        sw, sh = src.size
+        canvas.paste(src, (x + (w - sw) // 2, y + (h - sh) // 2), src)
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════
+#  FRONT CARD  — matches reference image exactly
+#
+#  Layout (vertical 211×307):
+#  ┌──────────────────────────────┐
+#  │ [logo] Grameen Bank          │  ← header (white bg, no green bar)
+#  │        Nobel Peace Prize…    │
+#  ├──────────────────────────────┤  ← thin border line
+#  │ [PHOTO]  Name (bold)         │
+#  │          ID : XXXXX          │
+#  │          Employee Desig.     │
+#  │          (Office Desig.)     │
+#  │          Department          │
+#  ├──────────────────────────────┤
+#  │ [CH sig]        [Auth sig]   │
+#  │ ──────────      ──────────   │
+#  │ Card Holder     Authority    │
+#  └──────────────────────────────┘
+# ══════════════════════════════════════════════════════════════
+
+def draw_front(card, fonts, raw_photo, raw_ch_sign, raw_auth_sign):
+    img  = Image.new("RGB", (RW, RH), C_WHITE)
+    draw = ImageDraw.Draw(img)
+    PAD  = s(10)
+
+    # ── HEADER: logo left, bank name right of logo (WHITE background) ──
+    LOGO_MAX_W = s(52)
+    LOGO_MAX_H = s(52)
+    LOGO_X     = PAD
+    LOGO_Y     = s(8)
+    lw, lh = paste_logo(img, LOGO_PATH, LOGO_X, LOGO_Y, LOGO_MAX_W, LOGO_MAX_H)
+
+    draw = ImageDraw.Draw(img)
+    TX = LOGO_X + (lw + s(6) if lw else 0)
+    TY = s(10)
+    draw.text((TX, TY), "Grameen Bank", font=fonts["logo_name"], fill=C_GREEN)
+    TY += th_val(draw, "Grameen Bank", fonts["logo_name"]) + s(2)
+    draw.text((TX, TY), "Nobel Peace Prize Winner", font=fonts["logo_sub"], fill=C_RED)
+
+    HDR_H = max(LOGO_Y + lh + s(6), s(62))
+
+    # Thin separator line under header
+    hline(draw, HDR_H, 0, RW, C_BORDER, s(1))
+
+    # ── BODY: photo LEFT, text RIGHT ──────────────────────────
+    BODY_Y  = HDR_H + s(10)
+
+    # Photo dimensions
+    PW = s(82)
+    PH = s(105)
+    PX = PAD
+    PY = BODY_Y
+
+    # Signature strip height (reserved at bottom)
+    SIG_STRIP_H = s(58)
+    SIG_Y0      = RH - SIG_STRIP_H
+
+    # Photo border
+    draw.rectangle([PX - s(2), PY - s(2), PX + PW + s(2), PY + PH + s(2)],
+                   outline=C_BORDER, width=s(1))
+    draw.rectangle([PX, PY, PX + PW, PY + PH], fill=(210, 218, 228))
+    if raw_photo:
+        paste_photo(img, raw_photo, PX, PY, PW, PH)
+    else:
+        draw.text(
+            (PX + PW // 2 - tw(draw, "Photo", fonts["emp_desig"]) // 2,
+             PY + PH // 2 - s(6)),
+            "Photo", font=fonts["emp_desig"], fill=C_MID_GREY)
+
+    # Text area — right of photo
+    TX  = PX + PW + s(10)
+    IW  = RW - TX - PAD     # available width for text
+    TY  = BODY_Y
+
+    draw = ImageDraw.Draw(img)
+
+    # ── Name (bold, left-aligned in text column) ──
+    name  = card["name"]
+    nfont = fonts["emp_name"]
+    while tw(draw, name, nfont) > IW:
+        try:
+            nfont = ImageFont.truetype(nfont.path, nfont.size - SCALE)
+        except Exception:
+            break
+    draw.text((TX, TY), name, font=nfont, fill=C_BLACK)
+    TY += th_val(draw, name, nfont) + s(4)
+
+    # ── ID ──
+    id_str = f"ID : {card['id']}"
+    draw.text((TX, TY), id_str, font=fonts["emp_id"], fill=C_BLACK)
+    TY += th_val(draw, id_str, fonts["emp_id"]) + s(6)
+
+    # ── Employee Designation (e.g. "Assistant Software Engineer") ──
+    if card["designation"]:
+        for wl in wrap_text(draw, card["designation"], fonts["emp_desig"], IW, max_lines=2):
+            draw.text((TX, TY), wl, font=fonts["emp_desig"], fill=C_DARK_GREY)
+            TY += th_val(draw, wl, fonts["emp_desig"]) + s(2)
+
+    # ── Office Designation in brackets (e.g. "(Senior Officer)") ──
+    if card["office_designation"]:
+        od_str = f"({card['office_designation']})"
+        for wl in wrap_text(draw, od_str, fonts["emp_desig"], IW, max_lines=1):
+            draw.text((TX, TY), wl, font=fonts["emp_desig"], fill=C_DARK_GREY)
+            TY += th_val(draw, wl, fonts["emp_desig"]) + s(2)
+
+    # ── Department ──
+    if card["department"]:
+        for wl in wrap_text(draw, card["department"], fonts["emp_desig"], IW, max_lines=2):
+            draw.text((TX, TY), wl, font=fonts["emp_desig"], fill=C_DARK_GREY)
+            TY += th_val(draw, wl, fonts["emp_desig"]) + s(2)
+
+    # ── SIGNATURE STRIP at bottom ─────────────────────────────
+    hline(draw, SIG_Y0, 0, RW, C_BORDER, s(1))
+
+    HALF   = RW // 2
+    # Each sig occupies half the card width minus padding
+    SIG_W  = HALF - PAD - s(8)
+    # Signature image area — taller so actual sig image shows well
+    SIG_H  = s(34)
+    SIG_PY = SIG_Y0 + s(4)
+
+    # Card Holder — LEFT half
+    if raw_ch_sign:
+        paste_signature(img, raw_ch_sign, PAD, SIG_PY, SIG_W, SIG_H)
+    draw = ImageDraw.Draw(img)
+    # underline
+    LINE_Y = SIG_PY + SIG_H + s(2)
+    draw.line([(PAD, LINE_Y), (PAD + SIG_W, LINE_Y)], fill=C_DARK_GREY, width=s(1))
+    # label centered under line
+    centered(draw, "Card Holder", fonts["sig_label"],
+             PAD + SIG_W // 2, LINE_Y + s(3), C_DARK_GREY)
+
+    # Authority — RIGHT half
+    AX = HALF + s(8)
+    if raw_auth_sign:
+        paste_signature(img, raw_auth_sign, AX, SIG_PY, SIG_W, SIG_H)
+    draw = ImageDraw.Draw(img)
+    draw.line([(AX, LINE_Y), (AX + SIG_W, LINE_Y)], fill=C_DARK_GREY, width=s(1))
+    centered(draw, "Authority", fonts["sig_label"],
+             AX + SIG_W // 2, LINE_Y + s(3), C_DARK_GREY)
+
+    return rounded_white_card(img)
+
+
+# ══════════════════════════════════════════════════════════════
+#  BACK CARD
+# ══════════════════════════════════════════════════════════════
+
+def draw_back(card, fonts):
+    img  = Image.new("RGB", (RW, RH), C_WHITE)
+    draw = ImageDraw.Draw(img)
+    PAD  = s(14)
+    CX   = RW // 2
+    IW   = RW - PAD * 2
+
+    # Green header
+    HDR_H = s(40)
+    draw.rectangle([0, 0, RW, HDR_H], fill=C_GREEN)
+    centered(draw, "Employee Information", fonts["back_head"], CX, s(9), C_WHITE)
+    draw.line([(0, HDR_H), (RW, HDR_H)], fill=C_GOLD, width=s(2))
+
+    Y = HDR_H + s(12)
+
+    def info_row(label, value, y):
+        draw.text((PAD, y), f"{label} :", font=fonts["back_label"], fill=C_BLACK)
+        lw_ = tw(draw, f"{label} :", fonts["back_label"])
+        draw.text((PAD + lw_ + s(5), y), value, font=fonts["back_value"], fill=C_DARK_GREY)
+        return y + th_val(draw, "Ag", fonts["back_value"]) + s(5)
+
+    Y = info_row("Blood Group", card["blood_group"] or "-", Y)
+    Y = info_row("National ID", card["national_id"] or "-", Y)
+    Y = info_row("Mobile",      card["mobile"]       or "-", Y)
+
+    Y += s(4)
+    hline(draw, Y, PAD, RW - PAD, C_BORDER, s(1))
+    Y += s(10)
+
+    # Permanent Address
+    centered(draw, "Permanent Address", fonts["back_sec"], CX, Y, C_BLACK)
+    Y += th_val(draw, "Ag", fonts["back_sec"]) + s(5)
+    for ln in wrap_text(draw, card["address"], fonts["back_value"], IW, max_lines=4):
+        centered(draw, ln, fonts["back_value"], CX, Y, C_DARK_GREY)
+        Y += th_val(draw, "Ag", fonts["back_value"]) + s(3)
+
+    Y += s(8)
+    issuing_str = f"Issuing Date : {card['issuing_date']}"
+    centered(draw, issuing_str, fonts["back_value"], CX, Y, C_BLACK)
+    Y += th_val(draw, "Ag", fonts["back_value"]) + s(10)
+
+    hline(draw, Y, PAD, RW - PAD, C_BORDER, s(1))
+    Y += s(10)
+
+    # Return to block
+    centered(draw, "If found please return to :", fonts["back_ret"], CX, Y, C_MID_GREY)
+    Y += th_val(draw, "Ag", fonts["back_ret"]) + s(7)
+
+    centered(draw, "Grameen Bank", fonts["back_bank"], CX, Y, C_GREEN)
+    Y += th_val(draw, "Ag", fonts["back_bank"]) + s(4)
+
+    for ln in wrap_text(draw, card["bank_address"], fonts["back_dept"], IW, max_lines=5):
+        centered(draw, ln, fonts["back_dept"], CX, Y, C_DARK_GREY)
+        Y += th_val(draw, "Ag", fonts["back_dept"]) + s(3)
+
+    # Bottom green bar
+    draw.rectangle([0, RH - s(4), RW, RH], fill=C_GREEN)
+
+    return rounded_white_card(img)
+
+
+# ══════════════════════════════════════════════════════════════
+#  IMAGE EXTRACTION FROM EXCEL
+# ══════════════════════════════════════════════════════════════
+
+def col_letter_to_index(letter):
+    result = 0
+    for ch in letter.upper().strip():
+        result = result * 26 + (ord(ch) - ord('A') + 1)
+    return result
+
+def get_anchor_row_col(img_obj):
+    anchor = img_obj.anchor
+    if hasattr(anchor, '_from'):
+        return anchor._from.row + 1, anchor._from.col + 1
+    elif hasattr(anchor, 'row'):
+        return anchor.row + 1, anchor.col + 1
+    elif isinstance(anchor, str):
+        r, c = coordinate_to_tuple(anchor)
+        return r, c
+    return None, None
+
+def extract_raw_images(excel_path, *col_letters):
+    wb     = load_workbook(excel_path)
+    ws     = wb.active
+    cols   = {c.upper(): col_letter_to_index(c) for c in col_letters}
+    result = {c: {} for c in cols}
+    images = getattr(ws, '_images', [])
+    if not images:
+        print("  Warning: No embedded images found in Excel.")
+        return result
+    for img_obj in images:
+        try:
+            row, col_idx = get_anchor_row_col(img_obj)
+            if row is None:
+                continue
+            raw = img_obj._data()
+            if callable(raw):
+                raw = raw()
+            for col_letter, target_idx in cols.items():
+                if col_idx == target_idx:
+                    result[col_letter][row] = raw
+        except Exception as e:
+            print(f"  Warning: Image read error: {e}")
+    for c in cols:
+        print(f"  -> Column {c}: {len(result[c])} image(s)")
+    return result
+
+
+# ══════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════
+
+def generate_cards(
+    excel_path         = EXCEL_PATH,
+    output_dir         = OUTPUT_DIR,
+    output_format      = OUTPUT_FORMAT,
+    col_photo          = COL_PHOTO,
+    col_cardholder_sig = COL_CARDHOLDER_SIG,
+    col_authority_sig  = COL_AUTHORITY_SIG,
+):
+    print(f"\n{'='*62}")
+    print(f"   Grameen Bank Employee Card Generator")
+    print(f"{'='*62}")
+    print(f"  Excel      : {excel_path}")
+    print(f"  Output     : {output_dir}/  ({output_format})")
+    print(f"  Card size  : {CARD_W} x {CARD_H} px  VERTICAL")
+    print(f"  Render     : {RW} x {RH} px  (x{SCALE} scale)  ->  {DPI} DPI")
+    print(f"  Font       : Times New Roman")
+    print(f"  Logo path  : {LOGO_PATH}")
+    print(f"{'='*62}\n")
+
+    if not os.path.isfile(excel_path):
+        sys.exit(f"ERROR: Excel file not found: {excel_path}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    print("Step 1 . Extracting embedded images ...")
+    raw_imgs     = extract_raw_images(excel_path, col_photo,
+                                      col_cardholder_sig, col_authority_sig)
+    photo_map    = raw_imgs[col_photo.upper()]
+    ch_sig_map   = raw_imgs[col_cardholder_sig.upper()]
+    auth_sig_map = raw_imgs[col_authority_sig.upper()]
+    print()
+
+    print("Step 2 . Reading employee data ...")
+    df = pd.read_excel(excel_path, dtype=str).fillna("")
+    df.columns = df.columns.str.strip()
+    required = [
+        "EmployeeID", "Name", "Blood Group", "National ID", "Mobile Number",
+        "Permanent Address", "Office Designation", "Employee Designation",
+        "Department", "Issuing Date", "Bank's Address",
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        sys.exit(f"ERROR: Missing columns: {missing}\nFound: {list(df.columns)}")
+    print(f"  -> {len(df)} record(s) found.\n")
+
+    print("Step 3 . Loading fonts ...")
+    fonts = load_fonts()
+    print()
+
+    print("Step 4 . Rendering cards ...")
+    saved = []
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        excel_row = i + 2
+        try:
+            issuing_date = pd.to_datetime(
+                row["Issuing Date"], dayfirst=True).strftime("%d %B %Y")
+        except Exception:
+            issuing_date = str(row["Issuing Date"]).strip()
+
+        #----Mobile No fix----    
+        mobile_raw = str(row["Mobile Number"]).strip()
+        mobile_raw = mobile_raw.split(".")[0]
+        if not mobile_raw.startswith("0"):
+         mobile_raw = "0" + mobile_raw    
+
+        card = {
+            "id":                 str(row["EmployeeID"]).strip(),
+            "name":               str(row["Name"]).strip(),
+            "blood_group":        str(row["Blood Group"]).strip(),
+            "national_id":        str(row["National ID"]).strip(),
+            "mobile":             mobile_raw,
+            "address":            str(row["Permanent Address"]).strip(),
+            "office_designation": str(row["Office Designation"]).strip(),
+            "designation":        str(row["Employee Designation"]).strip(),
+            "department":         str(row["Department"]).strip(),
+            "issuing_date":       issuing_date,
+            "bank_address":       str(row["Bank's Address"]).strip(),
+        }
+
+        raw_photo     = photo_map.get(excel_row)
+        raw_ch_sign   = ch_sig_map.get(excel_row)
+        raw_auth_sign = auth_sig_map.get(excel_row)
+
+        # Render at 4x scale
+        front_r = draw_front(card, fonts, raw_photo, raw_ch_sign, raw_auth_sign)
+        back_r  = draw_back(card, fonts)
+
+        # Compose full sheet
+        sheet_r = Image.new("RGB", (RW, SHEET_RH), (238, 240, 242))
+        sheet_r.paste(front_r, (0, 0))
+        sheet_r.paste(back_r,  (0, RH + GAP_R))
+
+        # Dashed cut line
+        dd    = ImageDraw.Draw(sheet_r)
+        dash_y = RH + GAP_R // 2
+        for x in range(0, RW, s(20)):
+            dd.line([(x, dash_y), (min(x + s(12), RW), dash_y)],
+                    fill=(150, 155, 160), width=s(1))
+        try:
+            sf = fonts["sig_label"]
+            sx = RW // 2 - tw(dd, "X", sf) // 2
+            sy = dash_y - th_val(dd, "X", sf) // 2
+            dd.text((sx, sy), "X", font=sf, fill=(130, 135, 142))
+        except Exception:
+            pass
+
+        # Downsample to final size (LANCZOS = highest quality)
+        final_w  = CARD_W
+        final_h  = CARD_H * 2 + GAP_PX
+        sheet_final = sheet_r.resize((final_w, final_h), Image.LANCZOS)
+
+        # Save
+        safe_id  = card["id"].replace("/", "-").replace("\\", "-").replace(" ", "_")
+        ext      = "jpg" if output_format.upper() == "JPEG" else "png"
+        out_path = os.path.join(output_dir, f"{safe_id}.{ext}")
+
+        if output_format.upper() == "JPEG":
+            sheet_final.convert("RGB").save(
+                out_path, "JPEG", quality=97, dpi=(DPI, DPI), subsampling=0)
+        else:
+            sheet_final.save(out_path, "PNG", dpi=(DPI, DPI))
+
+        saved.append(out_path)
+        print(f"  [{i+1:>3}/{len(df)}]  {card['name']:<32}->  {out_path}")
+
+    print(f"\n{'='*62}")
+    print(f"  Done!  {len(saved)} card sheet(s) saved to: ./{output_dir}/")
+    print(f"{'='*62}")
+    print("\n-- Print tips --------------------------------------------------")
+    print("  * Print at 100% scale -- do NOT scale / fit to page")
+    print("  * Cut along the dashed centre line")
+    print("  * Laminate for a professional finish")
+    print("----------------------------------------------------------------\n")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Grameen Bank Employee ID Card Generator -- Vertical, High Quality, Times New Roman")
+    parser.add_argument("--excel",        default=EXCEL_PATH)
+    parser.add_argument("--output-dir",   default=OUTPUT_DIR)
+    parser.add_argument("--format",       default=OUTPUT_FORMAT, choices=["PNG", "JPEG"])
+    parser.add_argument("--col-photo",    default=COL_PHOTO)
+    parser.add_argument("--col-ch-sig",   default=COL_CARDHOLDER_SIG)
+    parser.add_argument("--col-auth-sig", default=COL_AUTHORITY_SIG)
+    args = parser.parse_args()
+
+    generate_cards(
+        excel_path         = args.excel,
+        output_dir         = args.output_dir,
+        output_format      = args.format,
+        col_photo          = args.col_photo,
+        col_cardholder_sig = args.col_ch_sig,
+        col_authority_sig  = args.col_auth_sig,
+    )

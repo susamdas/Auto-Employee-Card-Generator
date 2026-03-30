@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'DM Sans', Arial, sans-serif;
+    background: #ffffff;
+  }
+
+  /* ══ ONE PAGE PER EMPLOYEE ══════════════════════════════
+     Each .employee-page holds front + back of ONE person.
+     wkhtmltopdf will create a new PDF page for each.
+  ═══════════════════════════════════════════════════════*/
+  .employee-page {
+    width: 210mm;          /* A4 width  */
+    height: 297mm;         /* A4 height */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8mm;
+    page-break-after: always;
+    break-after: page;
+    background: #f0f2f5;
+    padding: 10mm;
+  }
+
+  /* Last page: no trailing page break */
+  .employee-page:last-child {
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+
+  /* ── Label above each card ── */
+  .card-label {
+    font-size: 8pt;
+    font-weight: 600;
+    color: #6b7a90;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    align-self: flex-start;
+    margin-left: calc(50% - 40.64mm);   /* align with card left edge */
+  }
+
+  /* ══ SHARED CARD SHELL: 85.6 × 54 mm (standard CR80 ID) ═*/
+  .card {
+    width: 85.6mm;
+    height: 54mm;
+    position: relative;
+    border-radius: 4mm;
+    overflow: hidden;
+    box-shadow: 0 3mm 10mm rgba(0,0,0,0.22);
+    flex-shrink: 0;
+  }
+
+  /* ═══════════════════════════════════════════════════════
+     FRONT CARD
+  ═══════════════════════════════════════════════════════ */
+  .card-front { background: #0d1b2a; }
+
+  /* Gold top accent bar */
+  .card-front::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1.2mm;
+    background: linear-gradient(90deg, #b87614 0%, #f5d06e 50%, #b87614 100%);
+    z-index: 5;
+  }
+
+  /* Subtle diagonal background shape */
+  .front-bg-shape {
+    position: absolute;
+    top: -8mm; right: -8mm;
+    width: 32mm; height: 40mm;
+    background: linear-gradient(135deg, #1a2e45, #0a131e);
+    border-radius: 40% 10% 40% 10%;
+    opacity: 0.6;
+    z-index: 0;
+  }
+
+  /* Faint watermark "ID" */
+  .front-watermark {
+    position: absolute;
+    bottom: 1mm; right: 2mm;
+    font-family: 'Bebas Neue', Impact, sans-serif;
+    font-size: 18mm;
+    letter-spacing: 2mm;
+    color: rgba(232,160,32,0.05);
+    z-index: 0;
+    user-select: none;
+    line-height: 1;
+  }
+
+  /* ── Left photo strip (18mm wide) ── */
+  .photo-strip {
+    position: absolute;
+    top: 0; left: 0;
+    width: 18mm;
+    height: 100%;
+    background: linear-gradient(180deg, #1a2e45 0%, #0b1520 100%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1.5mm;
+    z-index: 2;
+  }
+
+  /* Gold divider line */
+  .photo-strip::after {
+    content: '';
+    position: absolute;
+    top: 10%; right: 0;
+    width: 0.4mm; height: 80%;
+    background: linear-gradient(180deg, transparent, #e8a020 35%, #e8a020 65%, transparent);
+  }
+
+  /* Photo frame */
+  .photo-frame {
+    width: 13mm;
+    height: 16mm;
+    border-radius: 1.5mm;
+    overflow: hidden;
+    border: 0.4mm solid #e8a020;
+    background: #2a3f55;
+    flex-shrink: 0;
+  }
+
+  .photo-frame img {
+    width: 100%; height: 100%;
+    object-fit: cover; display: block;
+  }
+
+  /* Silhouette placeholder */
+  .no-photo {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .no-photo svg { width: 7mm; height: 7mm; fill: #3a5a7a; }
+
+  /* Blood group badge */
+  .blood-badge {
+    background: #e8a020;
+    color: #0d1b2a;
+    font-family: 'Bebas Neue', Impact, sans-serif;
+    font-size: 3mm;
+    letter-spacing: 0.3mm;
+    padding: 0.5mm 2mm;
+    border-radius: 0.8mm;
+    flex-shrink: 0;
+  }
+
+  /* ── Right info area ── */
+  .info-area {
+    position: absolute;
+    top: 3mm;
+    left: 20mm;
+    right: 1.5mm;
+    bottom: 5.5mm;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .company-label {
+    font-family: 'Bebas Neue', Impact, sans-serif;
+    font-size: 2.2mm;
+    letter-spacing: 0.8mm;
+    color: #e8a020;
+    margin-bottom: 0.5mm;
+  }
+
+  .emp-name {
+    font-family: 'Bebas Neue', Impact, sans-serif;
+    font-size: 5mm;
+    letter-spacing: 0.1mm;
+    color: #ffffff;
+    line-height: 1.05;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .emp-desig {
+    font-size: 2mm;
+    font-weight: 500;
+    color: #e8a020;
+    letter-spacing: 0.2mm;
+    margin-bottom: 1.5mm;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .detail-grid { display: flex; flex-direction: column; gap: 0.9mm; flex: 1; }
+
+  .detail-row { display: flex; align-items: flex-start; gap: 1.5mm; }
+
+  .detail-icon {
+    width: 3.5mm; height: 3.5mm;
+    background: rgba(232,160,32,0.1);
+    border-radius: 0.7mm;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; margin-top: 0.2mm;
+  }
+  .detail-icon svg { width: 2mm; height: 2mm; fill: #e8a020; }
+
+  .detail-text { font-size: 2mm; color: #aac4de; line-height: 1.4; }
+  .detail-text strong {
+    display: block;
+    font-size: 1.7mm;
+    color: #507090;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.2mm;
+  }
+
+  /* ── Bottom ID bar ── */
+  .front-bottom {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 5.5mm;
+    background: rgba(232,160,32,0.08);
+    border-top: 0.3mm solid rgba(232,160,32,0.18);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 2mm 0 20mm;
+    z-index: 3;
+  }
+
+  .id-code {
+    font-family: 'Bebas Neue', Impact, sans-serif;
+    font-size: 2.5mm;
+    letter-spacing: 0.5mm;
+    color: #e8a020;
+  }
+
+  .issue-date { font-size: 1.8mm; color: #507090; letter-spacing: 0.1mm; }
+
+  /* Decorative barcode lines */
+  .barcode { display: flex; gap: 0.3mm; align-items: center; height: 3mm; }
+  .barcode span { display: inline-block; background: rgba(232,160,32,0.4); }
+
+
+  /* ═══════════════════════════════════════════════════════
+     BACK CARD
+  ═══════════════════════════════════════════════════════ */
+  .card-back {
+    background: linear-gradient(160deg, #0f2236 0%, #0d1b2a 60%, #091420 100%);
+  }
+
+  /* Gold bottom accent bar */
+  .card-back::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 1.2mm;
+    background: linear-gradient(90deg, #b87614 0%, #f5d06e 50%, #b87614 100%);
+    z-index: 5;
+  }
+
+  /* Diagonal shape (opposite corner to front) */
+  .back-bg-shape {
+    position: absolute;
+    bottom: -6mm; left: -6mm;
+    width: 28mm; height: 34mm;
+    background: linear-gradient(315deg, #1a2e45, #0a131e);
+    border-radius: 10% 40% 10% 40%;
+    opacity: 0.5;
+    z-index: 0;
+  }
+
+  .back-content {
+    position: absolute;
+    top: 3mm; left: 3mm; right: 3mm; bottom: 3.5mm;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5mm;
+  }
+
+  .back-section-title {
+    font-family: 'Bebas Neue', Impact, sans-serif;
+    font-size: 2.2mm;
+    letter-spacing: 0.6mm;
+    color: #e8a020;
+    border-bottom: 0.3mm solid rgba(232,160,32,0.25);
+    padding-bottom: 0.6mm;
+  }
+
+  .back-text { font-size: 1.9mm; color: #aac4de; line-height: 1.5; }
+
+  /* ── Card holder info row ── */
+  .back-id-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+
+  .back-field-label {
+    font-size: 1.6mm;
+    color: #507090;
+    text-transform: uppercase;
+    letter-spacing: 0.2mm;
+    font-weight: 600;
+  }
+
+  .back-field-value {
+    font-family: 'Bebas Neue', Impact, sans-serif;
+    font-size: 3.5mm;
+    letter-spacing: 0.15mm;
+    line-height: 1.1;
+  }
+
+  /* ── Signature row ── */
+  .sig-row {
+    display: flex;
+    gap: 3mm;
+    margin-top: auto;
+    padding-top: 1mm;
+    border-top: 0.3mm solid rgba(255,255,255,0.06);
+  }
+
+  .sig-box {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.8mm;
+  }
+
+  .sig-image-wrap {
+    width: 100%;
+    height: 9mm;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    border-bottom: 0.3mm solid rgba(232,160,32,0.4);
+    padding-bottom: 0.6mm;
+    overflow: hidden;
+  }
+
+  .sig-image-wrap img {
+    max-height: 100%;
+    max-width: 100%;
+    object-fit: contain;
+    /* White-ify dark signatures so they show on dark background */
+    filter: brightness(0) invert(1) opacity(0.75);
+  }
+
+  .sig-placeholder {
+    width: 100%; height: 100%;
+    display: flex; align-items: flex-end; justify-content: center;
+    padding-bottom: 1mm;
+  }
+  .sig-placeholder span {
+    font-style: italic;
+    font-size: 1.8mm;
+    color: rgba(255,255,255,0.12);
+  }
+
+  .sig-label {
+    font-size: 1.6mm;
+    color: #507090;
+    text-transform: uppercase;
+    letter-spacing: 0.3mm;
+    font-weight: 600;
+    text-align: center;
+  }
+
+  /* ══ PRINT STYLES ════════════════════════════════════════ */
+  @media print {
+    body { background: white; }
+    .employee-page { background: #f0f2f5; }
+    .card { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+
+  @page { size: A4 Portrait; margin: 0; }
+</style>
+</head>
+<body>
+
+  {% for card in cards %}
+  <div class="employee-page">
+
+    <!-- ─────── FRONT ─────────────────────────────────── -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:1.5mm;width:100%;align-items:center;">
+      <div style="font-size:2mm;font-weight:600;color:#6b7a90;text-transform:uppercase;letter-spacing:1px;align-self:center;">▼ Front Side</div>
+
+      <div class="card card-front">
+        <div class="front-bg-shape"></div>
+        <div class="front-watermark">ID</div>
+
+        <!-- Photo strip -->
+        <div class="photo-strip">
+          <div class="photo-frame">
+            {% if card.photo_src %}
+              <img src="{{ card.photo_src }}" alt="Photo">
+            {% else %}
+              <div class="no-photo">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/>
+                </svg>
+              </div>
+            {% endif %}
+          </div>
+          <div class="blood-badge">{{ card.blood_group }}</div>
+        </div>
+
+        <!-- Info area -->
+        <div class="info-area">
+          <div class="company-label">Employee Identity Card</div>
+          <div class="emp-name">{{ card.name }}</div>
+          <div class="emp-desig">{{ card.designation }}{% if card.office_designation and card.office_designation != card.designation %} · {{ card.office_designation }}{% endif %}</div>
+
+          <div class="detail-grid">
+
+            <div class="detail-row">
+              <div class="detail-icon">
+                <!-- Building icon -->
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M12 7V3H2v18h20V7H12zM6 19H4v-2h2v2zm0-4H4v-2h2v2zm0-4H4V9h2v2zm0-4H4V5h2v2zm4 12H8v-2h2v2zm0-4H8v-2h2v2zm0-4H8V9h2v2zm0-4H8V5h2v2zm10 12h-8v-2h2v-2h-2v-2h2v-2h-2V9h8v10zm-2-8h-2v2h2v-2zm0 4h-2v2h2v-2z"/>
+                </svg>
+              </div>
+              <div class="detail-text">
+                <strong>Department</strong>
+                {{ card.department }}
+              </div>
+            </div>
+
+            <div class="detail-row">
+              <div class="detail-icon">
+                <!-- ID icon -->
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M9 11.75A1.25 1.25 0 1 0 9 14.25 1.25 1.25 0 0 0 9 11.75zm6 0a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5zM12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm0-12.5c-2.33 0-4.31 1.46-5.11 3.5h1.67a3.996 3.996 0 0 1 6.88 0h1.67A5.99 5.99 0 0 0 12 7.5z"/>
+                </svg>
+              </div>
+              <div class="detail-text">
+                <strong>National ID</strong>
+                {{ card.national_id }}
+              </div>
+            </div>
+
+            <div class="detail-row">
+              <div class="detail-icon">
+                <!-- Phone icon -->
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.01-.24c1.12.37 2.33.57 3.58.57a1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1c0 1.25.2 2.45.57 3.58a1 1 0 01-.25 1.01l-2.2 2.2z"/>
+                </svg>
+              </div>
+              <div class="detail-text">
+                <strong>Mobile</strong>
+                {{ card.mobile }}
+              </div>
+            </div>
+
+            <div class="detail-row">
+              <div class="detail-icon">
+                <!-- Location pin icon -->
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+                </svg>
+              </div>
+              <div class="detail-text">
+                <strong>Address</strong>
+                {{ card.address[:60] }}{% if card.address|length > 60 %}…{% endif %}
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Bottom ID bar -->
+        <div class="front-bottom">
+          <div style="display:flex;gap:1.5mm;align-items:center;">
+            <span class="id-code">ID: {{ card.id }}</span>
+            <div class="barcode">
+              {% set widths  = [1,2,1,3,1,2,1,1,2,3,1,2] %}
+              {% set heights = ["2.5mm","3.5mm","2mm","3.5mm","2mm","3mm","3.5mm","2mm","3.5mm","2.5mm","3mm","2mm"] %}
+              {% for w in widths %}
+              <span style="width:{{ w }}px; height:{{ heights[loop.index0] }};"></span>
+              {% endfor %}
+            </div>
+          </div>
+          <span class="issue-date">ISSUED: {{ card.issuing_date }}</span>
+        </div>
+
+      </div><!-- /card-front -->
+    </div>
+
+    <!-- Cut line hint (will be invisible when printing on dark background) -->
+    <div style="width:85.6mm;height:0;border-top:0.3mm dashed #c0c8d4;position:relative;">
+      <span style="position:absolute;left:50%;transform:translateX(-50%);top:-1.5mm;font-size:1.5mm;color:#aab4c0;background:#f0f2f5;padding:0 1mm;">✂</span>
+    </div>
+
+    <!-- ─────── BACK ──────────────────────────────────── -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:1.5mm;width:100%;align-items:center;">
+      <div style="font-size:2mm;font-weight:600;color:#6b7a90;text-transform:uppercase;letter-spacing:1px;align-self:center;">▼ Back Side</div>
+
+      <div class="card card-back">
+        <div class="back-bg-shape"></div>
+
+        <div class="back-content">
+
+          <!-- Bank / Office address -->
+          <div>
+            <div class="back-section-title">Bank / Office Address</div>
+            <div class="back-text">{{ card.bank_address }}</div>
+          </div>
+
+          <!-- Employee summary -->
+          <div class="back-id-row">
+            <div>
+              <div class="back-field-label">Card Holder</div>
+              <div class="back-field-value" style="color:#ffffff;">{{ card.name }}</div>
+              <div style="font-size:1.8mm;color:#e8a020;letter-spacing:0.15mm;margin-top:0.3mm;">{{ card.designation }}</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="back-field-label">Employee ID</div>
+              <div class="back-field-value" style="color:#e8a020;letter-spacing:0.5mm;">{{ card.id }}</div>
+            </div>
+          </div>
+
+          <!-- Signatures -->
+          <div class="sig-row">
+
+            <div class="sig-box">
+              <div class="sig-image-wrap">
+                {% if card.cardholder_sign_src %}
+                  <img src="{{ card.cardholder_sign_src }}" alt="Cardholder Signature">
+                {% else %}
+                  <div class="sig-placeholder"><span>Signature</span></div>
+                {% endif %}
+              </div>
+              <div class="sig-label">Card Holder Sign</div>
+            </div>
+
+            <div class="sig-box">
+              <div class="sig-image-wrap">
+                {% if card.authority_sign_src %}
+                  <img src="{{ card.authority_sign_src }}" alt="Authority Signature">
+                {% else %}
+                  <div class="sig-placeholder"><span>Signature</span></div>
+                {% endif %}
+              </div>
+              <div class="sig-label">Authority Sign</div>
+            </div>
+
+          </div>
+
+        </div><!-- /back-content -->
+      </div><!-- /card-back -->
+    </div>
+
+  </div><!-- /employee-page -->
+  {% endfor %}
+
+</body>
+</html>
